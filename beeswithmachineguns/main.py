@@ -25,8 +25,11 @@ THE SOFTWARE.
 """
 
 import bees
+import re
 import sys
 from optparse import OptionParser, OptionGroup
+
+NO_TRAILING_SLASH_REGEX = re.compile(r'^.*?\.\w+$')
 
 def parse_options():
     """
@@ -55,6 +58,7 @@ commands:
     up_group.add_option('-k', '--key',  metavar="KEY",  nargs=1,
                         action='store', dest='key', type='string', 
                         help="The ssh key pair name to use to connect to the new servers.")
+
     up_group.add_option('-s', '--servers', metavar="SERVERS", nargs=1,
                         action='store', dest='servers', type='int', default=5,
                         help="The number of servers to start (default: 5).")
@@ -63,13 +67,13 @@ commands:
                         help="The security group to run the instances under (default: default).")
     up_group.add_option('-z', '--zone',  metavar="ZONE",  nargs=1,
                         action='store', dest='zone', type='string', default='us-east-1d',
-                        help="The region and availability zone to start the instances in (default: us-east-1d).")
-    up_group.add_option('-i', '--imageid',  metavar="IMAGE",  nargs=1,
-                        action='store', dest='image', type='string', default='',
-                        help="The AMI id to use as a base for each server. (default: use region specific AMI's)")
+                        help="The availability zone to start the instances in (default: us-east-1d).")
+    up_group.add_option('-i', '--instance',  metavar="INSTANCE",  nargs=1,
+                        action='store', dest='instance', type='string', default='ami-ff17fb96',
+                        help="The instance-id to use for each server from (default: ami-ff17fb96).")
     up_group.add_option('-l', '--login',  metavar="LOGIN",  nargs=1,
-                        action='store', dest='login', type='string', default='ubuntu',
-                        help="The ssh username name to use to connect to the new servers (default: ubuntu).")
+                        action='store', dest='login', type='string', default='newsapps',
+                        help="The ssh username name to use to connect to the new servers (default: newsapps).")
 
     parser.add_option_group(up_group)
 
@@ -79,39 +83,55 @@ commands:
     # Required
     attack_group.add_option('-u', '--url', metavar="URL", nargs=1,
                         action='store', dest='url', type='string',
-                        help="URL of the target to attack. Comma-separated multiple URLs ok, will be handed to machines round-robin.")
+                        help="URL of the target to attack.")
+
     attack_group.add_option('-n', '--number', metavar="NUMBER", nargs=1,
                         action='store', dest='number', type='int', default=1000,
                         help="The number of total connections to make to the target (default: 1000).")
     attack_group.add_option('-c', '--concurrent', metavar="CONCURRENT", nargs=1,
                         action='store', dest='concurrent', type='int', default=100,
                         help="The number of concurrent connections to make to the target (default: 100).")
+    attack_group.add_option('-p', '--post-file', metavar="POSTFILE", nargs=1,
+                        action='store', dest='postfile', type='string', default=None,
+                        help="The file containing data to post.  Remember to also set -T")
+    attack_group.add_option('-t', '--content-type', metavar="CONTENTTYPE", nargs=1,
+                        action='store', dest='contenttype', type='string', default="text/plain",
+                        help="Content-type header to use for POST/PUT data, eg. application/x-www-form-urlencoded.  Default: text/plain.")
 
     parser.add_option_group(attack_group)
 
     (options, args) = parser.parse_args()
 
     if len(args) <= 0:
-        parser.error("Please enter a command.")
+        parser.error('Please enter a command.')
 
     command = args[0]
 
-    if command == "up":
+    if command == 'up':
         if not options.key:
             parser.error('To spin up new instances you need to specify a key-pair name with -k')
 
         if options.group == 'default':
             print 'New bees will use the "default" EC2 security group. Please note that port 22 (SSH) is not normally open on this group. You will need to use to the EC2 tools to open it before you will be able to attack.'
 
-        bees.up(options.servers, options.group, options.zone, options.image, options.login, options.key)
-    elif command == "attack":
+        bees.up(options.servers, options.group, options.zone, options.instance, options.login, options.key)
+    elif command == 'attack':
         if not options.url:
-            parser.error("To run an attack you need to specify a url with -u")
+            parser.error('To run an attack you need to specify a url with -u')
+
+        if NO_TRAILING_SLASH_REGEX.match(options.url):
+            parser.error('It appears your URL lacks a trailing slash, this will disorient the bees. Please try again with a trailing slash.')
         
-        bees.attack(options.url, options.number, options.concurrent)
-    elif command == "down":
+        username, key_name, instance_ids = bees._read_server_list()
+        requests_per_instance = options.number / len(instance_ids)
+        concurrent_requests_per_instance = options.concurrent / len(instance_ids)
+        if requests_per_instance < concurrent_requests_per_instance:
+            parser.error("The total number of concurrent requests per instance (" + str(concurrent_requests_per_instance) + ") is greater than the total number of requests per instance (" + str(requests_per_instance) +")")
+
+        bees.attack(options.url, options.number, options.concurrent, options.postfile, options.contenttype)
+    elif command == 'down':
         bees.down()
-    elif command == "report":
+    elif command == 'report':
         bees.report()
 
 

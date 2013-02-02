@@ -32,41 +32,35 @@ import sys
 import time
 import urllib2
 
-import boto.ec2
-
+import boto
 import paramiko
 
 EC2_INSTANCE_TYPE = 't1.micro'
-EC2_REGIONAL_AMIS = {'us-east-1': 'ami-3202f25b', 'us-west-1': 'ami-f5bfefb0', 'eu-west-1': 'ami-3d1f2b49', 'ap-southeast-1': 'ami-f092eca2'}
-PACKAGES_TO_INSTALL = 'apache2-utils'
 STATE_FILENAME = os.path.expanduser('~/.bees')
 
 # Utilities
 
 def _read_server_list():
+    instance_ids = []
+
     if not os.path.isfile(STATE_FILENAME):
-        return (None, None, None, None)
+        return (None, None, None)
 
     with open(STATE_FILENAME, 'r') as f:
         username = f.readline().strip()
         key_name = f.readline().strip()
-        region = f.readline().strip()
         text = f.read()
-        instance_ids = [item for item in text.split('\n') if item != '']
+        instance_ids = text.split('\n')
 
         print 'Read %i bees from the roster.' % len(instance_ids)
 
-    return (username, key_name, region, instance_ids)
+    return (username, key_name, instance_ids)
 
-def _write_credentials(username, key_name, region):
+def _write_server_list(username, key_name, instances):
     with open(STATE_FILENAME, 'w') as f:
         f.write('%s\n' % username)
         f.write('%s\n' % key_name)
-        f.write('%s\n' % region)
-
-def _append_server_list(instance_id):
-    with open(STATE_FILENAME, 'a') as f:
-        f.write('%s\n' % instance_id)
+        f.write('\n'.join([instance.id for instance in instances]))
 
 def _delete_server_list():
     os.remove(STATE_FILENAME)
@@ -74,48 +68,13 @@ def _delete_server_list():
 def _get_pem_path(key):
     return os.path.expanduser('~/.ssh/%s.pem' % key)
 
-def _prepare_instances(params):
-    if params['instance_ip'] is None:
-        print "Instance IP was none. oh boo."
-        return False
-
-    print "Setting up bee %s @ %s." % (params['instance_id'],  params['instance_ip'])
-
-    time.sleep(20)
-
-    try:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        print "Connecting to instance %s" % params['instance_ip']
-        client.connect(
-            params['instance_ip'],
-            username=params['username'],
-            key_filename=_get_pem_path(params['key_name']))
-
-        print "Installing goods"
-        install_ab_stdin, install_ab_stdout, install_ab_stderr = client.exec_command('sudo apt-get install -y  %s' % PACKAGES_TO_INSTALL)
-        ab_installation = install_ab_stdout.read()
-        time.sleep(5)
-        verify_ab_stdin, verify_ab_stdout, verify_ab_stderr = client.exec_command('sudo ab')
-        verify_ab_stderr = verify_ab_stderr.read()
-        client.close()
-
-        if re.search("Usage: ab \[options\] \[http\[s\]\:\/\/\]hostname\[\:port\]\/path", verify_ab_stderr):
-            _append_server_list(params['instance_id'])
-            print 'Bee %s is ready for the attack.' % params['instance_id']
-            return True
-    except Exception, e:
-        print "Exception: %s" % e
-
-    return False
-
 # Methods
 
 def up(count, group, zone, image_id, username, key_name):
     """
     Startup the load testing server.
     """
-    existing_username, existing_key_name, existing_region, instance_ids = _read_server_list()
+    existing_username, existing_key_name, instance_ids = _read_server_list()
 
     if instance_ids:
         print 'Bees are already assembled and awaiting orders.'
@@ -131,13 +90,9 @@ def up(count, group, zone, image_id, username, key_name):
 
     print 'Connecting to the hive.'
 
-    region = re.match('([a-z]{2}-[a-z]*-\d)', zone).group(0)
-    ec2_connection = boto.ec2.connect_to_region(region)
+    ec2_connection = boto.connect_ec2()
 
     print 'Attempting to call up %i bees.' % count
-
-    if not image_id:
-        image_id = EC2_REGIONAL_AMIS[region]
 
     reservation = ec2_connection.run_instances(
         image_id=image_id,
@@ -150,48 +105,35 @@ def up(count, group, zone, image_id, username, key_name):
 
     print 'Waiting for bees to load their machine guns...'
 
+    instance_ids = []
+
     for instance in reservation.instances:
         while instance.state != 'running':
+            print '.'
             time.sleep(5)
             instance.update()
 
-    _write_credentials(username, key_name, region)
+        instance_ids.append(instance.id)
 
-    params = []
-    for instance in reservation.instances:
-        ip_address = instance.ip_address
-        if ip_address is None:
-            ip_address = socket.gethostbyname(instance.dns_name)
+        print 'Bee %s is ready for the attack.' % instance.id
 
-        params.append({
-            'instance_ip': ip_address,
-            'instance_id': instance.id,
-            'username': username,
-            'key_name': key_name,
-        })
+    ec2_connection.create_tags(instance_ids, { "Name": "a bee!" })
 
-    pool = Pool(len(params))
-    result = pool.map(_prepare_instances, params)
+    _write_server_list(username, key_name, reservation.instances)
 
-    if False not in result:
-        print 'The swarm has assembled %i bees.' % len(reservation.instances)
-    else:
-        terminated_instance_ids = ec2_connection.terminate_instances(
-            instance_ids=[instance['instance_id'] for instance in params])
-        _delete_server_list()
-        print 'Assembly of the swarm has failed.'
+    print 'The swarm has assembled %i bees.' % len(reservation.instances)
 
 def report():
     """
     Report the status of the load testing servers.
     """
-    username, key_name, region, instance_ids = _read_server_list()
+    username, key_name, instance_ids = _read_server_list()
 
     if not instance_ids:
         print 'No bees have been mobilized.'
         return
 
-    ec2_connection = boto.ec2.connect_to_region(region)
+    ec2_connection = boto.connect_ec2()
 
     reservations = ec2_connection.get_all_instances(instance_ids=instance_ids)
 
@@ -207,7 +149,7 @@ def down():
     """
     Shutdown the load testing server.
     """
-    username, key_name, region, instance_ids = _read_server_list()
+    username, key_name, instance_ids = _read_server_list()
 
     if not instance_ids:
         print 'No bees have been mobilized.'
@@ -215,7 +157,7 @@ def down():
 
     print 'Connecting to the hive.'
 
-    ec2_connection = boto.ec2.connect_to_region(region)
+    ec2_connection = boto.connect_ec2()
 
     print 'Calling off the swarm.'
 
@@ -241,10 +183,16 @@ def _attack(params):
             params['instance_name'],
             username=params['username'],
             key_filename=_get_pem_path(params['key_name']))
+        
+        print 'Bee %i is firing his machine gun. Bang bang!' % params['i']
 
-        print 'Bee %i is firing his machine gun. Bang bang! (%s)' % (params['i'], params['url'])
-
-        stdin, stdout, stderr = client.exec_command('ab -r -n %(num_requests)s -c %(concurrent_requests)s -C "sessionid=NotARealSessionID" %(url)s' % params)
+        command = 'ab -r -n %(num_requests)s -c %(concurrent_requests)s -C "sessionid=NotARealSessionID"' % params
+        if params['post_file']:
+            os.system("scp %(post_file)s %(username)s@%(instance_name)s" % params)
+            command += ' -p /home/%(username)s/' % params + os.path.basename(params['post_file']) + ' -T %(content_type)s' % params
+        command += ' %(url)s' % params
+        
+        stdin, stdout, stderr = client.exec_command(command)
 
         response = {}
 
@@ -273,6 +221,7 @@ def _attack(params):
         return response
     except socket.error, e:
         return e
+
 
 def _print_results(results):
     """
@@ -326,12 +275,12 @@ def _print_results(results):
         print 'Mission Assessment: Target severely compromised.'
     else:
         print 'Mission Assessment: Swarm annihilated target.'
-
-def attack(url, n, c):
+    
+def attack(url, n, c, postfile, contenttype):
     """
     Test the root url of this site.
     """
-    username, key_name, region, instance_ids = _read_server_list()
+    username, key_name, instance_ids = _read_server_list()
 
     if not instance_ids:
         print 'No bees are ready to attack.'
@@ -339,7 +288,7 @@ def attack(url, n, c):
 
     print 'Connecting to the hive.'
 
-    ec2_connection = boto.ec2.connect_to_region(region)
+    ec2_connection = boto.connect_ec2()
 
     print 'Assembling bees.'
 
@@ -358,24 +307,24 @@ def attack(url, n, c):
 
     params = []
 
-    print 'Stinging URL so it will be cached for the attack.'
-
-    urls = url.split(",")
-    last_url = ""
     for i, instance in enumerate(instances):
-        last_url = urls[i % len(urls)] or last_url
         params.append({
             'i': i,
             'instance_id': instance.id,
             'instance_name': instance.public_dns_name,
-            'url': last_url,
+            'url': url,
             'concurrent_requests': connections_per_instance,
             'num_requests': requests_per_instance,
             'username': username,
             'key_name': key_name,
+            'post_file': postfile,
+            'content_type': contenttype,
         })
-        if last_url:
-            urllib2.urlopen(last_url)
+
+    # Ping url so it will be cached for testing
+    if postfile is None:
+        print 'Stinging URL so it will be cached for the attack.'
+        urllib2.urlopen(url)
 
     print 'Organizing the swarm.'
 
@@ -388,3 +337,4 @@ def attack(url, n, c):
     _print_results(results)
 
     print 'The swarm is awaiting new orders.'
+ 
