@@ -9,22 +9,12 @@ h2. Dependencies
 * Python 2.6
 * boto
 * paramiko
+* mkvirtualenv
+* python-crypto
+* python-dev
+* possibly other python dependencies
 
-h2. Installation for users
-
-Preferred:
-
-<pre>
-pip install beeswithmachineguns
-</pre>
-
-or, if you must:
-
-<pre>
-easy_install beeswithmachineguns
-</pre>
-
-h2. Installation for developers (w/ virtualenv + virtualenvwrapper)
+h2. Installation (w/ virtualenv + virtualenvwrapper)
 
 <pre>
 git clone git://github.com/newsapps/beeswithmachineguns.git
